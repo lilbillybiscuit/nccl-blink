@@ -33,6 +33,7 @@
 #include "os.h"
 #include "env.h"
 #include "rma/rma.h"
+#include "graph/blink.h"
 
 #define STR2(v) #v
 #define STR(v) STR2(v)
@@ -57,6 +58,7 @@ NCCL_PARAM(CollnetEnable, "COLLNET_ENABLE", NCCL_CONFIG_UNDEF_INT);
 NCCL_PARAM(NvlsChannels, "NVLS_NCHANNELS", NCCL_CONFIG_UNDEF_INT);
 NCCL_PARAM(NumRmaCtx, "NUM_RMA_CTX", NCCL_CONFIG_UNDEF_INT);
 NCCL_PARAM(SetCpuStackSize, "SET_CPU_STACK_SIZE", 1);
+NCCL_PARAM(Blink, "BLINK", 0);
 
 extern int64_t ncclParamSingleProcMemRegEnable();
 
@@ -1099,7 +1101,12 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   treeGraph->pattern = NCCL_TOPO_PATTERN_BALANCED_TREE;
   treeGraph->minChannels = ringGraph->nChannels;
   treeGraph->maxChannels = ringGraph->nChannels;
-  NCCLCHECKGOTO(ncclTopoCompute(comm->topo, treeGraph), ret, fail);
+  if (ncclParamBlink()) {
+    treeGraph->pattern = NCCL_TOPO_PATTERN_TREE;
+    NCCLCHECKGOTO(ncclBlinkCompute(comm->topo, treeGraph, ringGraph->nChannels), ret, fail);
+  } else {
+    NCCLCHECKGOTO(ncclTopoCompute(comm->topo, treeGraph), ret, fail);
+  }
   NCCLCHECKGOTO(ncclTopoPrintGraph(comm->topo, treeGraph), ret, fail);
 
   memset(collNetChainGraph, 0, sizeof(struct ncclTopoGraph));

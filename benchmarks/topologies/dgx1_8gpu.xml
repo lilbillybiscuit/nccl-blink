@@ -1,0 +1,103 @@
+<system version="1" name="DGX1-V100-8GPU">
+  <cpu host_hash="0xDEADBEEF0001" affinity="0" arch="x86_64" vendor="GenuineIntel" familyid="6" modelid="85">
+    <!-- DGX-1 V100: Hybrid cube-mesh NVLink topology.
+         Each GPU has 6 NVLinks total. Connectivity matrix (NVLink count):
+           GPU0: 1->1, 2->1, 3->2, 4->2
+           GPU1: 0->1, 2->2, 3->1, 5->2
+           GPU2: 0->1, 1->2, 3->1, 6->2
+           GPU3: 0->2, 1->1, 2->1, 7->2
+           GPU4: 0->2, 5->1, 6->1, 7->2
+           GPU5: 1->2, 4->1, 6->2, 7->1
+           GPU6: 2->2, 4->1, 5->2, 7->1
+           GPU7: 3->2, 4->2, 5->1, 6->1
+         tclass 0x030200 = GPU-to-GPU NVLink -->
+
+    <!-- GPU 0: bus 00:04.0 -->
+    <pci busid="0000:06:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="0" sm="70" rank="0" gdr="1">
+        <nvlink target="0000:07:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0a:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 1: bus 00:05.0 -->
+    <pci busid="0000:07:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="1" sm="70" rank="1" gdr="1">
+        <nvlink target="0000:06:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0b:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 2: bus 00:06.0 -->
+    <pci busid="0000:08:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="2" sm="70" rank="2" gdr="1">
+        <nvlink target="0000:06:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:07:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0c:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 3: bus 00:07.0 -->
+    <pci busid="0000:09:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="3" sm="70" rank="3" gdr="1">
+        <nvlink target="0000:06:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:07:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0d:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 4: bus 00:08.0 -->
+    <pci busid="0000:0a:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="4" sm="70" rank="4" gdr="1">
+        <nvlink target="0000:06:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0b:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0c:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0d:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 5: bus 00:09.0 -->
+    <pci busid="0000:0b:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="5" sm="70" rank="5" gdr="1">
+        <nvlink target="0000:07:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0a:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0c:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0d:00.0" count="1" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 6: bus 00:0a.0 -->
+    <pci busid="0000:0c:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="6" sm="70" rank="6" gdr="1">
+        <nvlink target="0000:08:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0a:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0b:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0d:00.0" count="1" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <!-- GPU 7: bus 00:0b.0 -->
+    <pci busid="0000:0d:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="7" sm="70" rank="7" gdr="1">
+        <nvlink target="0000:09:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0a:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0b:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:0c:00.0" count="1" tclass="0x030200"/>
+      </gpu>
+    </pci>
+  </cpu>
+</system>

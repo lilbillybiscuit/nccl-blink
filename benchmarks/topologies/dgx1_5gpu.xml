@@ -1,0 +1,54 @@
+<system version="1" name="DGX1-V100-5GPU-frag">
+  <cpu host_hash="0xDEADBEEF0001" affinity="0" arch="x86_64" vendor="GenuineIntel" familyid="6" modelid="85">
+    <!-- Fragmented: GPUs 0-3 + 4 (drop 5,6,7). 4 from island 0, 1 from island 1.
+         Asymmetric allocation — GPU4 has only cross-island NVLinks to GPU0. -->
+
+    <pci busid="0000:06:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="0" sm="70" rank="0" gdr="1">
+        <nvlink target="0000:07:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:0a:00.0" count="2" tclass="0x030200"/>
+      </gpu>
+    </pci>
+
+    <pci busid="0000:07:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="1" sm="70" rank="1" gdr="1">
+        <nvlink target="0000:06:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="1" tclass="0x030200"/>
+        <!-- nvlink to GPU5 removed -->
+      </gpu>
+    </pci>
+
+    <pci busid="0000:08:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="2" sm="70" rank="2" gdr="1">
+        <nvlink target="0000:06:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:07:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:09:00.0" count="1" tclass="0x030200"/>
+        <!-- nvlink to GPU6 removed -->
+      </gpu>
+    </pci>
+
+    <pci busid="0000:09:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="3" sm="70" rank="3" gdr="1">
+        <nvlink target="0000:06:00.0" count="2" tclass="0x030200"/>
+        <nvlink target="0000:07:00.0" count="1" tclass="0x030200"/>
+        <nvlink target="0000:08:00.0" count="1" tclass="0x030200"/>
+        <!-- nvlink to GPU7 removed -->
+      </gpu>
+    </pci>
+
+    <pci busid="0000:0a:00.0" class="0x030200" vendor="0x10de" device="0x1db4"
+         link_speed="16.0 GT/s" link_width="16">
+      <gpu dev="4" sm="70" rank="4" gdr="1">
+        <nvlink target="0000:06:00.0" count="2" tclass="0x030200"/>
+        <!-- nvlinks to GPU5,6,7 removed — only link is to GPU0 -->
+      </gpu>
+    </pci>
+  </cpu>
+</system>

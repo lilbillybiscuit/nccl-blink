@@ -2,3 +2,18 @@
 /build
 *.gcov
 /coverage/
+
+# IDE
+.idea/
+.vscode/
+.clangd
+cmake-build-*/
+*.swp
+*~
+
+# Benchmark artifacts
+benchmarks/nccl-tests/
+benchmarks/results/
+
+# Paper (LaTeX source, not part of the codebase)
+paper/
