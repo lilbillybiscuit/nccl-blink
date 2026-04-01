@@ -107,7 +107,7 @@ if [ "$USE_DEGRADED" -eq 1 ]; then
   # Degraded H200 topologies: artificially constrained NVLink counts
   echo "Degraded mode: using modified H200 topology XMLs"
   NGPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
-  for VARIANT in twoisland sparse asymmetric; do
+  for VARIANT in twoisland sparse; do
     TOPO_FILE="$TOPO_DIR/h200_${VARIANT}.xml"
     if [ ! -f "$TOPO_FILE" ]; then
       echo "Warning: $TOPO_FILE not found (skipping)"
