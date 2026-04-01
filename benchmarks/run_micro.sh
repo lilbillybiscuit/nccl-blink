@@ -76,6 +76,8 @@ run_bench() {
 
   if [ -n "$TOPO_FILE" ]; then
     ENV_VARS+=("NCCL_TOPO_FILE=$TOPO_FILE")
+    ENV_VARS+=("NCCL_IGNORE_DISABLED_P2P=2")
+    ENV_VARS+=("NCCL_IGNORE_CPU_AFFINITY=1")
   fi
 
   if [ -n "$CVD" ]; then
