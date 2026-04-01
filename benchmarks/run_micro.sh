@@ -26,6 +26,7 @@ FACTOR="2"
 WARMUP_ITERS="5"
 ITERS="20"
 USE_SIMULATED=0
+USE_DEGRADED=0
 FULL_ONLY=0
 CUSTOM_GPUS=""
 
@@ -34,6 +35,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --quick) END_SIZE="1M"; ITERS="5"; WARMUP_ITERS="2"; shift;;
     --simulated) USE_SIMULATED=1; shift;;
+    --degraded) USE_DEGRADED=1; shift;;
     --full-only) FULL_ONLY=1; shift;;
     --gpus) CUSTOM_GPUS="$2"; shift 2;;
     --iters) ITERS="$2"; shift 2;;
@@ -99,7 +101,22 @@ echo "Host: $(hostname)" >> "$SUMMARY"
 echo "GPUs: $(nvidia-smi -L 2>/dev/null || echo 'unknown')" >> "$SUMMARY"
 echo "" >> "$SUMMARY"
 
-if [ "$USE_SIMULATED" -eq 1 ]; then
+if [ "$USE_DEGRADED" -eq 1 ]; then
+  # Degraded H200 topologies: artificially constrained NVLink counts
+  echo "Degraded mode: using modified H200 topology XMLs"
+  NGPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+  for VARIANT in twoisland sparse asymmetric; do
+    TOPO_FILE="$TOPO_DIR/h200_${VARIANT}.xml"
+    if [ ! -f "$TOPO_FILE" ]; then
+      echo "Warning: $TOPO_FILE not found (skipping)"
+      continue
+    fi
+    echo "=== Degraded topology: $VARIANT ==="
+    for BLINK in 0 1; do
+      run_bench "degraded_${VARIANT}" "$BLINK" "$NGPUS" "$TOPO_FILE" "" 2>&1 | tee -a "$SUMMARY"
+    done
+  done
+elif [ "$USE_SIMULATED" -eq 1 ]; then
   # Simulated topologies via NCCL_TOPO_FILE (for machines without NVLink)
   echo "Simulated mode: using DGX-1 topology XML files"
   for TOPO in 8gpu 6gpu 5gpu 3gpu; do
