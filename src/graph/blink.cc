@@ -30,7 +30,8 @@ static int blinkGpuIndex(struct ncclTopoSystem* system, struct ncclTopoNode* nod
 }
 
 // Extract directed GPU interconnect graph from ncclTopoSystem.
-// Only NVLink edges are considered (intra-node).
+// Uses NCCL's computed paths (which resolve NVSwitch hops) rather than
+// raw links, so this works on both direct NVLink and NVSwitch topologies.
 static ncclResult_t blinkExtractGraph(struct ncclTopoSystem* system,
                                       struct BlinkGraph* bg) {
   memset(bg, 0, sizeof(struct BlinkGraph));
@@ -46,6 +47,7 @@ static ncclResult_t blinkExtractGraph(struct ncclTopoSystem* system,
     bg->gpuRanks[i] = system->nodes[GPU].nodes[i].gpu.rank;
   }
 
+  // First try: walk raw links for direct GPU-to-GPU NVLinks
   for (int i = 0; i < nGpus; i++) {
     struct ncclTopoNode* gpu = &system->nodes[GPU].nodes[i];
     for (int l = 0; l < gpu->nlinks; l++) {
@@ -55,7 +57,6 @@ static ncclResult_t blinkExtractGraph(struct ncclTopoSystem* system,
       int j = blinkGpuIndex(system, link->remNode);
       if (j < 0 || j >= nGpus) continue;
 
-      // Multiple NVLinks between same pair get summed
       int found = bg->edgeIndex[i][j];
       if (found >= 0) {
         bg->edges[found].capacity += link->bw;
@@ -73,19 +74,32 @@ static ncclResult_t blinkExtractGraph(struct ncclTopoSystem* system,
     }
   }
 
-  INFO(NCCL_GRAPH, "Blink: extracted graph with %d GPUs, %d directed edges",
-       bg->nVertices, bg->nEdges);
+  // Fallback: if no direct GPU-to-GPU edges found (NVSwitch topology),
+  // use NCCL's computed GPU-to-GPU paths instead.
+  if (bg->nEdges == 0) {
+    INFO(NCCL_GRAPH, "Blink: no direct GPU-GPU NVLinks, using computed paths (NVSwitch?)");
+    for (int i = 0; i < nGpus; i++) {
+      struct ncclTopoLinkList* paths = system->nodes[GPU].nodes[i].paths[GPU];
+      for (int j = 0; j < nGpus; j++) {
+        if (i == j) continue;
+        if (paths[j].type != PATH_NVL) continue;
+        if (paths[j].bw <= 0) continue;
 
-#ifdef DEBUG
-  for (int i = 0; i < nGpus; i++) {
-    for (int j = 0; j < nGpus; j++) {
-      int e = bg->edgeIndex[i][j];
-      if (e >= 0) {
-        assert(e < bg->nEdges && bg->edges[e].src == i && bg->edges[e].dst == j);
+        if (bg->nEdges >= BLINK_MAX_EDGES) {
+          WARN("Blink: too many edges");
+          return ncclInternalError;
+        }
+        bg->edgeIndex[i][j] = bg->nEdges;
+        bg->edges[bg->nEdges].src = i;
+        bg->edges[bg->nEdges].dst = j;
+        bg->edges[bg->nEdges].capacity = paths[j].bw;
+        bg->nEdges++;
       }
     }
   }
-#endif
+
+  INFO(NCCL_GRAPH, "Blink: extracted graph with %d GPUs, %d directed edges",
+       bg->nVertices, bg->nEdges);
 
   return ncclSuccess;
 }

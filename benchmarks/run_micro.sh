@@ -2,14 +2,15 @@
 # Blink Micro-Benchmark Sweep
 # Measures AllReduce throughput (GB/s) and latency (us) for:
 #   - NCCL_BLINK=0 (default trees) vs NCCL_BLINK=1 (packed spanning trees)
-#   - Multiple topology configurations (full 8-GPU, fragmented 6/5/3)
+#   - Full and fragmented GPU allocations (via CUDA_VISIBLE_DEVICES)
 #   - Message sizes from 1MB to 1000MB (doubling)
 #
 # Usage:
-#   ./run_micro.sh                    # Run full sweep
-#   ./run_micro.sh --topo 8gpu        # Run only 8-GPU topology
-#   ./run_micro.sh --quick            # Quick sanity check (1MB only)
-#   ./run_micro.sh --local            # Use local GPUs (no NCCL_TOPO_FILE)
+#   ./run_micro.sh                    # Full sweep: all GPUs + fragmented subsets
+#   ./run_micro.sh --quick            # Quick sanity check (1MB only, all GPUs)
+#   ./run_micro.sh --gpus 0,1,4      # Test specific GPU subset
+#   ./run_micro.sh --full-only       # Only run with all GPUs (no fragmented)
+#   ./run_micro.sh --simulated        # Use DGX-1 XML topologies (for testing without NVLink)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,15 +25,17 @@ END_SIZE="1000M"
 FACTOR="2"
 WARMUP_ITERS="5"
 ITERS="20"
-TOPOS="8gpu 6gpu 5gpu 3gpu"
-USE_LOCAL=0
+USE_SIMULATED=0
+FULL_ONLY=0
+CUSTOM_GPUS=""
 
 # Parse args
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --topo) TOPOS="$2"; shift 2;;
     --quick) END_SIZE="1M"; ITERS="5"; WARMUP_ITERS="2"; shift;;
-    --local) USE_LOCAL=1; shift;;
+    --simulated) USE_SIMULATED=1; shift;;
+    --full-only) FULL_ONLY=1; shift;;
+    --gpus) CUSTOM_GPUS="$2"; shift 2;;
     --iters) ITERS="$2"; shift 2;;
     *) echo "Unknown arg: $1"; exit 1;;
   esac
@@ -49,7 +52,6 @@ mkdir -p "$RESULTS_DIR"
 echo "=== Blink Micro-Benchmark Sweep ==="
 echo "Sizes: $BEGIN_SIZE to $END_SIZE (x$FACTOR)"
 echo "Iters: $ITERS (warmup: $WARMUP_ITERS)"
-echo "Topologies: $TOPOS"
 echo "Results: $RESULTS_DIR/"
 echo ""
 
@@ -57,7 +59,8 @@ run_bench() {
   local TOPO_NAME=$1
   local BLINK=$2
   local NGPUS=$3
-  local TOPO_FILE=$4
+  local TOPO_FILE=$4  # empty string = no NCCL_TOPO_FILE
+  local CVD=$5        # CUDA_VISIBLE_DEVICES value, empty = all
   local OUTFILE="$RESULTS_DIR/micro_${TOPO_NAME}_blink${BLINK}.log"
 
   echo "--- Running: ${TOPO_NAME} BLINK=${BLINK} (${NGPUS} GPUs) ---"
@@ -71,6 +74,10 @@ run_bench() {
 
   if [ -n "$TOPO_FILE" ]; then
     ENV_VARS+=("NCCL_TOPO_FILE=$TOPO_FILE")
+  fi
+
+  if [ -n "$CVD" ]; then
+    ENV_VARS+=("CUDA_VISIBLE_DEVICES=$CVD")
   fi
 
   env "${ENV_VARS[@]}" \
@@ -92,27 +99,68 @@ echo "Host: $(hostname)" >> "$SUMMARY"
 echo "GPUs: $(nvidia-smi -L 2>/dev/null || echo 'unknown')" >> "$SUMMARY"
 echo "" >> "$SUMMARY"
 
-if [ "$USE_LOCAL" -eq 1 ]; then
-  # Use actual local GPUs (no topology simulation)
-  NGPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
-  echo "Local mode: $NGPUS GPUs detected"
-  for BLINK in 0 1; do
-    run_bench "local_${NGPUS}gpu" "$BLINK" "$NGPUS" ""
-  done
-else
-  # Simulated topologies via NCCL_TOPO_FILE
-  for TOPO in $TOPOS; do
+if [ "$USE_SIMULATED" -eq 1 ]; then
+  # Simulated topologies via NCCL_TOPO_FILE (for machines without NVLink)
+  echo "Simulated mode: using DGX-1 topology XML files"
+  for TOPO in 8gpu 6gpu 5gpu 3gpu; do
     TOPO_FILE="$TOPO_DIR/dgx1_${TOPO}.xml"
     if [ ! -f "$TOPO_FILE" ]; then
       echo "Warning: topology file not found: $TOPO_FILE (skipping)"
       continue
     fi
     NGPUS=$(echo "$TOPO" | grep -o '[0-9]*')
-
     for BLINK in 0 1; do
-      run_bench "$TOPO" "$BLINK" "$NGPUS" "$TOPO_FILE" 2>&1 | tee -a "$SUMMARY"
+      run_bench "sim_${TOPO}" "$BLINK" "$NGPUS" "$TOPO_FILE" "" 2>&1 | tee -a "$SUMMARY"
     done
   done
+elif [ -n "$CUSTOM_GPUS" ]; then
+  # Custom GPU subset
+  NGPUS=$(echo "$CUSTOM_GPUS" | tr ',' '\n' | wc -l)
+  echo "Custom GPU subset: $CUSTOM_GPUS ($NGPUS GPUs)"
+  for BLINK in 0 1; do
+    run_bench "custom_${NGPUS}gpu" "$BLINK" "$NGPUS" "" "$CUSTOM_GPUS"
+  done
+else
+  # Real hardware mode (default)
+  TOTAL_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+  echo "Real hardware mode: $TOTAL_GPUS GPUs detected"
+  echo ""
+
+  # Full allocation
+  echo "=== Full allocation: all $TOTAL_GPUS GPUs ==="
+  for BLINK in 0 1; do
+    run_bench "full_${TOTAL_GPUS}gpu" "$BLINK" "$TOTAL_GPUS" "" ""
+  done
+
+  if [ "$FULL_ONLY" -eq 0 ] && [ "$TOTAL_GPUS" -ge 4 ]; then
+    # Fragmented allocations via CUDA_VISIBLE_DEVICES
+    # These simulate scheduler fragmentation on real NVLink hardware
+
+    # ~75% allocation (e.g., 6 of 8)
+    FRAG6=$(seq 0 $(($TOTAL_GPUS - 3)) | tr '\n' ',')
+    FRAG6=${FRAG6%,}
+    NGPUS6=$(echo "$FRAG6" | tr ',' '\n' | wc -l)
+    echo "=== Fragmented: $NGPUS6 GPUs ($FRAG6) ==="
+    for BLINK in 0 1; do
+      run_bench "frag_${NGPUS6}gpu" "$BLINK" "$NGPUS6" "" "$FRAG6"
+    done
+
+    # ~62% allocation (e.g., 5 of 8)
+    FRAG5=$(seq 0 $(($TOTAL_GPUS - 4)) | tr '\n' ',')
+    FRAG5=${FRAG5%,}
+    NGPUS5=$(echo "$FRAG5" | tr ',' '\n' | wc -l)
+    echo "=== Fragmented: $NGPUS5 GPUs ($FRAG5) ==="
+    for BLINK in 0 1; do
+      run_bench "frag_${NGPUS5}gpu" "$BLINK" "$NGPUS5" "" "$FRAG5"
+    done
+
+    # Adversarial: cross-NUMA GPUs (first, second, and one from other NUMA)
+    FRAG3="0,1,$((TOTAL_GPUS - 1))"
+    echo "=== Adversarial: 3 GPUs ($FRAG3) ==="
+    for BLINK in 0 1; do
+      run_bench "frag_3gpu" "$BLINK" "3" "" "$FRAG3"
+    done
+  fi
 fi
 
 echo ""
