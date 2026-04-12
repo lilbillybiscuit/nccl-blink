@@ -47,11 +47,11 @@ DATA_RE = re.compile(
     r"([\d.]+)\s+"        # time (us) out-of-place
     r"([\d.]+)\s+"        # algbw (GB/s)
     r"([\d.]+)\s+"        # busbw (GB/s)
-    r"(\d+)\s+"           # errors
+    r"(\d+|N/A)\s+"       # errors
     r"([\d.]+)\s+"        # time (us) in-place
     r"([\d.]+)\s+"        # algbw (GB/s) in-place
     r"([\d.]+)\s+"        # busbw (GB/s) in-place
-    r"(\d+)"              # errors in-place
+    r"(\d+|N/A)"          # errors in-place
 )
 
 
@@ -158,6 +158,9 @@ def build_env(visible_devices: str, lib_dir: Path, extra_env: dict[str, str]) ->
 
 
 def parse_perf_output(output: str) -> List[dict[str, object]]:
+    def parse_error_field(value: str) -> int | None:
+        return None if value == "N/A" else int(value)
+
     rows = []
     for line in output.splitlines():
         match = DATA_RE.match(line)
@@ -174,11 +177,11 @@ def parse_perf_output(output: str) -> List[dict[str, object]]:
                 "time_us": float(match.group(6)),
                 "algbw_gbps": float(match.group(7)),
                 "busbw_gbps": float(match.group(8)),
-                "errors": int(match.group(9)),
+                "errors": parse_error_field(match.group(9)),
                 "time_us_inplace": float(match.group(10)),
                 "algbw_gbps_inplace": float(match.group(11)),
                 "busbw_gbps_inplace": float(match.group(12)),
-                "errors_inplace": int(match.group(13)),
+                "errors_inplace": parse_error_field(match.group(13)),
             }
         )
     return rows
@@ -220,6 +223,7 @@ def run_benchmark(
     factor: str,
     warmup_iters: int,
     iters: int,
+    validation: int,
     run: RunConfig,
     extra_env: dict[str, str],
 ) -> tuple[List[dict[str, object]], Path]:
@@ -230,6 +234,7 @@ def run_benchmark(
         "-e", end_size,
         "-f", factor,
         "-g", str(run.gpu_count),
+        "-c", str(validation),
         "-w", str(warmup_iters),
         "-n", str(iters),
     ]
@@ -277,6 +282,7 @@ def run_benchmark(
                 "begin_size": begin_size,
                 "end_size": end_size,
                 "factor": factor,
+                "validation": validation,
                 "warmup_iters": warmup_iters,
                 "iters": iters,
                 **row,
@@ -312,6 +318,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--begin-size", default="8")
     parser.add_argument("--end-size", default="8G")
     parser.add_argument("--factor", default="2")
+    parser.add_argument("--validation", type=int, choices=(0, 1), default=0)
     parser.add_argument("--warmup-iters", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
@@ -347,6 +354,7 @@ def main() -> int:
     print(f"Subset mode: {args.subset_mode}")
     print(f"Raw CSV: {raw_csv}")
     print(f"Summary CSV: {summary_csv}")
+    print(f"Validation: {args.validation}")
     print()
 
     for gpu_count in gpu_counts:
@@ -371,6 +379,7 @@ def main() -> int:
                 begin_size=args.begin_size,
                 end_size=args.end_size,
                 factor=args.factor,
+                validation=args.validation,
                 warmup_iters=args.warmup_iters,
                 iters=args.iters,
                 run=run,
