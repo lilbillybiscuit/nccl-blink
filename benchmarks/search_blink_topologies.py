@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Search for topology shapes where Blink outperforms default NCCL trees.
 
-This harness takes a base NCCL topology XML, mutates its GPU NVLink graph into
-simple candidate families, benchmarks each candidate with `NCCL_BLINK=0` and
-`NCCL_BLINK=1`, and ranks the topologies where Blink wins on throughput or
+This harness takes a base NCCL topology XML, mutates its GPU NVLink structure
+into simple candidate families, benchmarks each candidate with `NCCL_BLINK=0`
+and `NCCL_BLINK=1`, and ranks the topologies where Blink wins on throughput or
 latency.
 
 The search is intentionally simple and stdlib-only:
-  - it mutates only the GPU-to-GPU NVLink counts in the XML
+  - it mutates either direct GPU-to-GPU NVLink counts or switch-backed GPU
+    uplink counts in the XML
   - it generates structured graph families plus random connected samples
   - it writes every generated topology XML to disk
   - it benchmarks candidates with nccl-tests `all_reduce_perf`
@@ -62,8 +63,8 @@ BLINK_TIMING_RE = re.compile(
 
 def default_base_topology() -> Path:
     candidates = (
-        REPO_ROOT / "benchmarks" / "topologies" / "dgx1_8gpu.xml",
         REPO_ROOT / "benchmarks" / "topologies" / "h200_real.xml",
+        REPO_ROOT / "benchmarks" / "topologies" / "dgx1_8gpu.xml",
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -147,6 +148,47 @@ def matrix_stats(matrix: Sequence[Sequence[int]]) -> dict[str, int]:
     }
 
 
+def switch_totals(counts: Sequence[Sequence[int]]) -> list[int]:
+    return [sum(int(value) for value in row) for row in counts]
+
+
+def switch_stats(counts: Sequence[Sequence[int]]) -> dict[str, int]:
+    totals = switch_totals(counts)
+    active_gpu_count = sum(1 for total in totals if total > 0)
+    degrees = [active_gpu_count - 1 if total > 0 else 0 for total in totals]
+    return {
+        "gpu_count": len(counts),
+        "undirected_edges": active_gpu_count * (active_gpu_count - 1) // 2,
+        "total_link_count": sum(totals),
+        "min_degree": min(degrees) if degrees else 0,
+        "max_degree": max(degrees) if degrees else 0,
+    }
+
+
+def candidate_stats(
+    template: TopologyTemplate, counts: Sequence[Sequence[int]]
+) -> dict[str, int]:
+    if is_direct_template(template):
+        return matrix_stats(counts)
+    return switch_stats(counts)
+
+
+def candidate_signature(
+    template: TopologyTemplate, counts: Sequence[Sequence[int]]
+) -> tuple[int, ...]:
+    if is_direct_template(template):
+        return matrix_signature(counts)
+    return tuple(int(value) for row in counts for value in row)
+
+
+def candidate_connected(
+    template: TopologyTemplate, counts: Sequence[Sequence[int]]
+) -> bool:
+    if is_direct_template(template):
+        return is_connected(counts)
+    return all(total > 0 for total in switch_totals(counts))
+
+
 def gmean(values: Iterable[float]) -> float | None:
     valid = [value for value in values if value and value > 0]
     if not valid:
@@ -189,10 +231,12 @@ class TopologyTemplate:
     source_path: Path
     root: ET.Element
     gpus: list[GpuNode]
+    kind: str
     base_counts: list[list[int]]
     positive_levels: list[int]
     default_tclass: str
     allow_new_edges: bool
+    switch_targets: list[str]
 
     @property
     def gpu_count(self) -> int:
@@ -216,6 +260,10 @@ class TopologyCandidate:
     total_link_count: int
     min_degree: int
     max_degree: int
+
+
+def is_direct_template(template: TopologyTemplate) -> bool:
+    return template.kind == "direct"
 
 
 class DisjointSet:
@@ -264,6 +312,8 @@ def load_topology_template(path: Path, allow_new_edges: bool) -> TopologyTemplat
     gpu_entries.sort(key=lambda gpu: (gpu.rank, gpu.dev, gpu.busid))
     bus_to_idx = {gpu.busid: index for index, gpu in enumerate(gpu_entries)}
     counts = zero_matrix(len(gpu_entries))
+    switch_target_order: list[str] = []
+    switch_rows: list[dict[str, int]] = [{} for _ in gpu_entries]
     default_tclass = None
     saw_gpu_nvlinks = False
 
@@ -278,46 +328,83 @@ def load_topology_template(path: Path, allow_new_edges: bool) -> TopologyTemplat
         for nvlink in gpu.findall("nvlink"):
             saw_gpu_nvlinks = True
             target = nvlink.get("target")
-            if target not in bus_to_idx:
-                continue
-            dst = bus_to_idx[target]
             count = int(nvlink.get("count", "0"))
-            counts[src][dst] = max(counts[src][dst], count)
             if default_tclass is None:
                 default_tclass = nvlink.get("tclass")
+            if target in bus_to_idx:
+                dst = bus_to_idx[target]
+                counts[src][dst] = max(counts[src][dst], count)
+            elif target:
+                if target not in switch_target_order:
+                    switch_target_order.append(target)
+                switch_rows[src][target] = max(switch_rows[src].get(target, 0), count)
 
     if default_tclass is None:
         default_tclass = "0x030200"
 
     counts = symmetrize(counts)
     positive_levels = sorted({count for row in counts for count in row if count > 0})
-    if not positive_levels:
-        if saw_gpu_nvlinks:
-            raise ValueError(
-                "topology "
-                f"{path} does not expose direct GPU-to-GPU nvlink targets. "
-                "This search harness currently expects XMLs where nvlink targets "
-                "name peer GPU bus IDs, such as benchmarks/topologies/dgx1_8gpu.xml."
-            )
-        raise ValueError(f"topology {path} has no GPU-to-GPU nvlink counts")
+    if positive_levels:
+        return TopologyTemplate(
+            source_path=path,
+            root=root,
+            gpus=gpu_entries,
+            kind="direct",
+            base_counts=counts,
+            positive_levels=positive_levels,
+            default_tclass=default_tclass,
+            allow_new_edges=allow_new_edges,
+            switch_targets=[],
+        )
 
-    return TopologyTemplate(
-        source_path=path,
-        root=root,
-        gpus=gpu_entries,
-        base_counts=counts,
-        positive_levels=positive_levels,
-        default_tclass=default_tclass,
-        allow_new_edges=allow_new_edges,
+    switch_counts = [
+        [row.get(target, 0) for target in switch_target_order]
+        for row in switch_rows
+    ]
+    switch_levels = sorted(
+        {
+            count
+            for row in switch_counts
+            for count in row
+            if count > 0
+        }
     )
+    if switch_levels:
+        return TopologyTemplate(
+            source_path=path,
+            root=root,
+            gpus=gpu_entries,
+            kind="switch",
+            base_counts=switch_counts,
+            positive_levels=switch_levels,
+            default_tclass=default_tclass,
+            allow_new_edges=allow_new_edges,
+            switch_targets=switch_target_order,
+        )
+
+    if saw_gpu_nvlinks:
+        raise ValueError(
+            f"topology {path} contains nvlink entries but none carried a positive count"
+        )
+    raise ValueError(f"topology {path} has no GPU nvlink counts")
 
 
 def edge_allowed(template: TopologyTemplate, src: int, dst: int) -> bool:
+    if not is_direct_template(template):
+        return False
     if src == dst:
         return False
     if template.allow_new_edges:
         return True
     return template.base_counts[src][dst] > 0
+
+
+def switch_link_allowed(template: TopologyTemplate, gpu: int, target_idx: int) -> bool:
+    if is_direct_template(template):
+        return False
+    if template.allow_new_edges:
+        return True
+    return template.base_counts[gpu][target_idx] > 0
 
 
 def write_topology_candidate(
@@ -340,18 +427,31 @@ def write_topology_candidate(
     for src, gpu in enumerate(template.gpus):
         gpu_node = gpu_nodes[gpu.busid]
         for child in list(gpu_node):
-            if child.tag == "nvlink" and child.get("target") in known_busids:
+            if child.tag != "nvlink":
+                continue
+            if not is_direct_template(template) or child.get("target") in known_busids:
                 gpu_node.remove(child)
 
-        for dst, target_gpu in enumerate(template.gpus):
-            count = int(counts[src][dst])
-            if src == dst or count <= 0:
-                continue
-            nvlink = ET.Element("nvlink")
-            nvlink.set("target", target_gpu.busid)
-            nvlink.set("count", str(count))
-            nvlink.set("tclass", template.default_tclass)
-            gpu_node.append(nvlink)
+        if is_direct_template(template):
+            for dst, target_gpu in enumerate(template.gpus):
+                count = int(counts[src][dst])
+                if src == dst or count <= 0:
+                    continue
+                nvlink = ET.Element("nvlink")
+                nvlink.set("target", target_gpu.busid)
+                nvlink.set("count", str(count))
+                nvlink.set("tclass", template.default_tclass)
+                gpu_node.append(nvlink)
+        else:
+            for target_idx, target in enumerate(template.switch_targets):
+                count = int(counts[src][target_idx])
+                if count <= 0:
+                    continue
+                nvlink = ET.Element("nvlink")
+                nvlink.set("target", target)
+                nvlink.set("count", str(count))
+                nvlink.set("tclass", template.default_tclass)
+                gpu_node.append(nvlink)
 
     tree = ET.ElementTree(root)
     if hasattr(ET, "indent"):
@@ -383,17 +483,30 @@ class CandidateRegistry:
     ) -> bool:
         if self.max_candidates > 0 and len(self.candidates) >= self.max_candidates:
             return False
-        counts = symmetrize(counts)
-        n = len(counts)
-        for src in range(n):
-            for dst in range(n):
-                if counts[src][dst] > 0 and not edge_allowed(self.template, src, dst):
-                    return False
+        if is_direct_template(self.template):
+            counts = symmetrize(counts)
+            n = len(counts)
+            for src in range(n):
+                for dst in range(n):
+                    if counts[src][dst] > 0 and not edge_allowed(self.template, src, dst):
+                        return False
+        else:
+            counts = [[int(value) for value in row] for row in counts]
+            if len(counts) != self.template.gpu_count:
+                return False
+            if any(len(row) != len(self.template.switch_targets) for row in counts):
+                return False
+            for gpu, row in enumerate(counts):
+                for target_idx, value in enumerate(row):
+                    if value < 0:
+                        return False
+                    if value > 0 and not switch_link_allowed(self.template, gpu, target_idx):
+                        return False
 
-        if not is_connected(counts):
+        if not candidate_connected(self.template, counts):
             return False
 
-        signature = matrix_signature(counts)
+        signature = candidate_signature(self.template, counts)
         if signature in self.seen:
             return False
         self.seen.add(signature)
@@ -401,7 +514,7 @@ class CandidateRegistry:
         safe_name = slugify(name)
         xml_path = self.output_dir / f"{safe_name}.xml"
         write_topology_candidate(self.template, counts, xml_path)
-        stats = matrix_stats(counts)
+        stats = candidate_stats(self.template, counts)
         self.candidates.append(
             TopologyCandidate(
                 name=safe_name,
@@ -438,6 +551,13 @@ def strong_levels(levels: Sequence[int]) -> list[int]:
 def weak_levels(levels: Sequence[int]) -> list[int]:
     low = levels[0]
     return [0, low]
+
+
+def search_levels(template: TopologyTemplate) -> list[int]:
+    levels = set(int(level) for level in template.positive_levels)
+    if levels and min(levels) > 1:
+        levels.add(1)
+    return sorted(levels)
 
 
 def build_uniform(template: TopologyTemplate, count: int) -> list[list[int]]:
@@ -509,6 +629,67 @@ def build_ring(
     return counts
 
 
+def build_switch_uniform(template: TopologyTemplate, count: int) -> list[list[int]]:
+    counts = [[0 for _ in template.switch_targets] for _ in range(template.gpu_count)]
+    for gpu in range(template.gpu_count):
+        for target_idx in range(len(template.switch_targets)):
+            if switch_link_allowed(template, gpu, target_idx):
+                counts[gpu][target_idx] = count
+    return counts
+
+
+def build_switch_group_strengths(
+    template: TopologyTemplate,
+    selector: Sequence[int],
+    strong_count: int,
+    weak_count: int,
+) -> list[list[int]]:
+    selected = set(selector)
+    counts = [[0 for _ in template.switch_targets] for _ in range(template.gpu_count)]
+    for gpu in range(template.gpu_count):
+        per_link_count = strong_count if gpu in selected else weak_count
+        for target_idx in range(len(template.switch_targets)):
+            if switch_link_allowed(template, gpu, target_idx):
+                counts[gpu][target_idx] = per_link_count
+    return counts
+
+
+def build_switch_alternating(
+    template: TopologyTemplate,
+    strong_count: int,
+    weak_count: int,
+) -> list[list[int]]:
+    strong_gpus = [gpu for gpu in range(template.gpu_count) if gpu % 2 == 0]
+    return build_switch_group_strengths(template, strong_gpus, strong_count, weak_count)
+
+
+def build_switch_random_candidate(
+    template: TopologyTemplate,
+    rng: random.Random,
+    count_palette: Sequence[int],
+) -> list[list[int]]:
+    counts = [[0 for _ in template.switch_targets] for _ in range(template.gpu_count)]
+    choices = [0, *count_palette]
+    non_zero_choices = [count for count in count_palette if count > 0]
+    for gpu in range(template.gpu_count):
+        active_targets = [
+            target_idx
+            for target_idx in range(len(template.switch_targets))
+            if switch_link_allowed(template, gpu, target_idx)
+        ]
+        if not active_targets:
+            return None
+        row_has_positive = False
+        for target_idx in active_targets:
+            value = rng.choice(choices)
+            counts[gpu][target_idx] = value
+            row_has_positive = row_has_positive or value > 0
+        if not row_has_positive:
+            force_target = rng.choice(active_targets)
+            counts[gpu][force_target] = rng.choice(non_zero_choices)
+    return counts
+
+
 def random_spanning_tree(
     n: int,
     allowed_edges: Sequence[tuple[int, int]],
@@ -568,7 +749,7 @@ def generate_candidates(
     max_candidates: int = 0,
 ) -> list[TopologyCandidate]:
     registry = CandidateRegistry(template, output_dir, max_candidates=max_candidates)
-    levels = template.positive_levels
+    levels = search_levels(template)
     n = template.gpu_count
 
     if "base" in families:
@@ -580,71 +761,143 @@ def generate_candidates(
             counts=template.base_counts,
         )
 
-    if "uniform" in families:
-        for count in levels:
-            registry.add(
-                family="uniform",
-                name=f"uniform_count_{count}",
-                description="All allowed NVLink edges share the same count",
-                params=f"count={count}",
-                counts=build_uniform(template, count),
-            )
-
-    if "two-islands" in families and n >= 4:
-        split = n // 2
-        for intra_count in strong_levels(levels):
-            for inter_count in weak_levels(levels):
+    if is_direct_template(template):
+        if "uniform" in families:
+            for count in levels:
                 registry.add(
-                    family="two-islands",
-                    name=f"two_islands_intra_{intra_count}_inter_{inter_count}",
-                    description="Dense intra-island links with weaker cross-island bridges",
-                    params=f"split={split},intra={intra_count},inter={inter_count}",
-                    counts=build_two_islands(template, split, intra_count, inter_count),
+                    family="uniform",
+                    name=f"uniform_count_{count}",
+                    description="All allowed NVLink edges share the same count",
+                    params=f"count={count}",
+                    counts=build_uniform(template, count),
                 )
 
-    if "hub" in families and n >= 4:
-        hub_indices = [0, n // 2]
-        if (n - 1) not in hub_indices:
-            hub_indices.append(n - 1)
-        seen_hubs = []
-        for hub in hub_indices:
-            if hub not in seen_hubs:
-                seen_hubs.append(hub)
-        for hub in seen_hubs:
+        if "two-islands" in families and n >= 4:
+            split = n // 2
+            for intra_count in strong_levels(levels):
+                for inter_count in weak_levels(levels):
+                    registry.add(
+                        family="two-islands",
+                        name=f"two_islands_intra_{intra_count}_inter_{inter_count}",
+                        description="Dense intra-island links with weaker cross-island bridges",
+                        params=f"split={split},intra={intra_count},inter={inter_count}",
+                        counts=build_two_islands(template, split, intra_count, inter_count),
+                    )
+
+        if "hub" in families and n >= 4:
+            hub_indices = [0, n // 2]
+            if (n - 1) not in hub_indices:
+                hub_indices.append(n - 1)
+            seen_hubs = []
+            for hub in hub_indices:
+                if hub not in seen_hubs:
+                    seen_hubs.append(hub)
+            for hub in seen_hubs:
+                for strong_count in strong_levels(levels):
+                    for weak_count in weak_levels(levels):
+                        registry.add(
+                            family="hub",
+                            name=f"hub_{hub}_strong_{strong_count}_weak_{weak_count}",
+                            description=f"Hub-and-spoke layout centered on GPU rank index {hub}",
+                            params=f"hub={hub},strong={strong_count},weak={weak_count}",
+                            counts=build_hub(template, hub, strong_count, weak_count),
+                        )
+
+        if "ring" in families and n >= 4:
             for strong_count in strong_levels(levels):
                 for weak_count in weak_levels(levels):
                     registry.add(
-                        family="hub",
-                        name=f"hub_{hub}_strong_{strong_count}_weak_{weak_count}",
-                        description=f"Hub-and-spoke layout centered on GPU rank index {hub}",
-                        params=f"hub={hub},strong={strong_count},weak={weak_count}",
-                        counts=build_hub(template, hub, strong_count, weak_count),
+                        family="ring",
+                        name=f"ring_strong_{strong_count}_weak_{weak_count}",
+                        description="Rank-ordered ring gets the strong links, all others are weak",
+                        params=f"strong={strong_count},weak={weak_count}",
+                        counts=build_ring(template, strong_count, weak_count),
                     )
 
-    if "ring" in families and n >= 4:
-        for strong_count in strong_levels(levels):
-            for weak_count in weak_levels(levels):
+        if "random" in families and random_samples > 0:
+            rng = random.Random(random_seed)
+            for sample_idx in range(random_samples):
+                counts = build_random_candidate(template, rng, levels)
+                if counts is None:
+                    continue
                 registry.add(
-                    family="ring",
-                    name=f"ring_strong_{strong_count}_weak_{weak_count}",
-                    description="Rank-ordered ring gets the strong links, all others are weak",
-                    params=f"strong={strong_count},weak={weak_count}",
-                    counts=build_ring(template, strong_count, weak_count),
+                    family="random",
+                    name=f"random_sample_{sample_idx:03d}",
+                    description="Random connected thinning seeded by a random spanning tree",
+                    params=f"seed={random_seed},sample={sample_idx}",
+                    counts=counts,
+                )
+    else:
+        if "uniform" in families:
+            for count in levels:
+                registry.add(
+                    family="uniform",
+                    name=f"uniform_count_{count}",
+                    description="Every GPU gets the same NVSwitch uplink count on each visible target",
+                    params=f"count={count}",
+                    counts=build_switch_uniform(template, count),
                 )
 
-    if "random" in families and random_samples > 0:
-        rng = random.Random(random_seed)
-        for sample_idx in range(random_samples):
-            counts = build_random_candidate(template, rng, levels)
-            if counts is None:
-                continue
-            registry.add(
-                family="random",
-                name=f"random_sample_{sample_idx:03d}",
-                description="Random connected thinning seeded by a random spanning tree",
-                params=f"seed={random_seed},sample={sample_idx}",
-                counts=counts,
-            )
+        if "two-islands" in families and n >= 4:
+            split = n // 2
+            island_a = list(range(split))
+            for strong_count in strong_levels(levels):
+                for weak_count in weak_levels(levels):
+                    registry.add(
+                        family="two-islands",
+                        name=f"two_islands_strong_{strong_count}_weak_{weak_count}",
+                        description="First half of GPUs get stronger NVSwitch uplinks than the second half",
+                        params=f"split={split},strong={strong_count},weak={weak_count}",
+                        counts=build_switch_group_strengths(
+                            template, island_a, strong_count, weak_count
+                        ),
+                    )
+
+        if "hub" in families and n >= 4:
+            hub_indices = [0, n // 2]
+            if (n - 1) not in hub_indices:
+                hub_indices.append(n - 1)
+            seen_hubs = []
+            for hub in hub_indices:
+                if hub not in seen_hubs:
+                    seen_hubs.append(hub)
+            for hub in seen_hubs:
+                for strong_count in strong_levels(levels):
+                    for weak_count in weak_levels(levels):
+                        registry.add(
+                            family="hub",
+                            name=f"hub_{hub}_strong_{strong_count}_weak_{weak_count}",
+                            description=f"GPU rank index {hub} gets stronger NVSwitch uplinks than its peers",
+                            params=f"hub={hub},strong={strong_count},weak={weak_count}",
+                            counts=build_switch_group_strengths(
+                                template, [hub], strong_count, weak_count
+                            ),
+                        )
+
+        if "ring" in families and n >= 4:
+            for strong_count in strong_levels(levels):
+                for weak_count in weak_levels(levels):
+                    registry.add(
+                        family="ring",
+                        name=f"ring_alternating_strong_{strong_count}_weak_{weak_count}",
+                        description="Alternating ranks get stronger versus weaker NVSwitch uplinks",
+                        params=f"strong={strong_count},weak={weak_count}",
+                        counts=build_switch_alternating(template, strong_count, weak_count),
+                    )
+
+        if "random" in families and random_samples > 0:
+            rng = random.Random(random_seed)
+            for sample_idx in range(random_samples):
+                counts = build_switch_random_candidate(template, rng, levels)
+                if counts is None:
+                    continue
+                registry.add(
+                    family="random",
+                    name=f"random_sample_{sample_idx:03d}",
+                    description="Randomized NVSwitch uplink counts per GPU and target",
+                    params=f"seed={random_seed},sample={sample_idx}",
+                    counts=counts,
+                )
 
     return registry.candidates
 
@@ -1042,7 +1295,7 @@ def main() -> int:
     template = load_topology_template(base_topology, allow_new_edges=args.allow_new_edges)
     families = parse_families(args.families)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run_dir = args.output_root.resolve() / timestamp
     generated_topology_dir = run_dir / "topologies"
 
